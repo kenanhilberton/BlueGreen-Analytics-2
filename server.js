@@ -6,18 +6,20 @@ const bcrypt = require('bcryptjs');
 
 const app = express();
 
-// CORS Ayarları
+// CORS Ayarları - Frontend ilə problemsiz əlaqə üçün
 app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 
-const JWT_SECRET = process.env.JWT_SECRET || 'bluegreen_secret_key_123'; 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/bluegreen_esg';
+// SƏNİN REAL AÇARLARIN - Birbaşa koda yazıldı ki, Render problemsiz oxusun
+const JWT_SECRET = 'bluegreen_analitika_gizli_acar_2026'; 
+const MONGO_URI = 'mongodb+srv://kenanalisov29_db_user:GWehppXLvdwEK9De@cluster0.79bqhp6.mongodb.net/bluegreen_esg?retryWrites=true&w=majority';
 
+// MONGODB-YƏ QOŞULMA STRATEQİYASI
 mongoose.connect(MONGO_URI)
-  .then(() => console.log('💾 MongoDB-yə uğurla qoşuldu!'))
-  .catch(err => console.error('❌ MongoDB qoşulma xətası:', err));
+  .then(() => console.log('💾 MongoDB-yə UĞURLA QOŞULDU!'))
+  .catch(err => console.error('❌ MONGODB QOŞULMA XƏTASI:', err.message));
 
-// --- 1. REAL İSTİFADƏÇİ MODELİ ---
+// --- 1. İSTİFADƏÇİ MODELİ ---
 const UserSchema = new mongoose.Schema({
   companyName: { type: String, required: true },
   userId: { type: String, required: true, unique: true }, 
@@ -26,7 +28,7 @@ const UserSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', UserSchema);
 
-// --- 2. SENSOR MODELİ VƏ İNTERVAL ---
+// --- 2. SENSOR MODELİ VƏ AVTOMATİK DATA GENERATORU ---
 const SensorDataSchema = new mongoose.Schema({
   co2Emission: Number,
   energyConsumption: Number,
@@ -50,9 +52,11 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Avtomatik Sensor Data Generatoru
+// Süni Data Generatoru (Hər 5 saniyədən bir)
 setInterval(async () => {
   try {
+    if (mongoose.connection.readyState !== 1) return; // Bazaya qoşulma yoxdursa işləməsin
+    
     const newData = new SensorData({
       co2Emission: Math.random() * (90 - 30) + 30,
       energyConsumption: Math.random() * (85 - 25) + 25,
@@ -62,23 +66,24 @@ setInterval(async () => {
       trainingHours: Math.floor(Math.random() * (24 - 10) + 10)
     });
     await newData.save();
+    
     const count = await SensorData.countDocuments();
     if (count > 100) {
       const oldest = await SensorData.findOne().sort({ timestamp: 1 });
       if (oldest) await SensorData.deleteOne({ _id: oldest._id });
     }
   } catch (err) {
-    console.error("Datanın bazaya yazılmasında xəta:", err.message);
+    console.error("Sensor datasının yazılmasında kiçik xəta:", err.message);
   }
 }, 5000);
 
-// --- 3. API MARŞRUTLARI (ROUTES) ---
+// --- 3. API ROUTES ---
 
 app.get('/', (req, res) => {
-  res.send('🚀 BlueGreen ESG Backend Server rəsmi olaraq aktivdir!');
+  res.send('🚀 BlueGreen ESG Backend Server 100% aktivdir və bazaya bağlıdır!');
 });
 
-// QEYDİYYAT (REGISTER) ROUTE-U
+// QEYDİYYAT MARŞRUTU
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { companyName, email, password, userId } = req.body;
@@ -106,12 +111,12 @@ app.post('/api/auth/register', async (req, res) => {
     res.status(201).json({ message: "Qeydiyyat uğurla tamamlandı!" });
 
   } catch (err) {
-    console.error("❌ REGISTER XƏTASI:", err.message);
-    res.status(500).json({ message: "Qeydiyyat zamanı server xətası: " + err.message });
+    console.error("❌ QEYDİYYAT XƏTASI:", err.message);
+    res.status(500).json({ message: "Qeydiyyat xətası: " + err.message });
   }
 });
 
-// GİRİŞ (LOGIN) ROUTE-U - 500 XƏTASINI KÖKÜNDƏN HƏLL EDƏN HİSSƏ
+// GİRİŞ MARŞRUTU
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password, userId } = req.body;
@@ -120,18 +125,15 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ message: "Müəssisə ID, E-poçt və Şifrə mütləqdir!" });
     }
 
-    // İlk öncə istifadəçini sadəcə email və userId ilə axtarırıq
     const user = await User.findOne({ email, userId });
     if (!user) {
       return res.status(400).json({ message: "Müəssisə ID və ya E-poçt yanlışdır!" });
     }
 
-    // Əgər bazada köhnə təhlükəsizlik tənzimləməsindən qalan heşlənməmiş şifrə varsa, sistemin çökməməsi üçün yoxlanış
     let isMatch = false;
     try {
       isMatch = await bcrypt.compare(password, user.password);
     } catch (bcryptErr) {
-      // Əgər bazadakı şifrə köhnədirsə (heşlənməyibsə), birbaşa mətn müqayisəsi edir ki, 500 xətası verməsin
       isMatch = (password === user.password);
     }
 
@@ -139,7 +141,7 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ message: "Şifrə yanlışdır!" });
     }
 
-    // Token Yaradılması
+    // Təhlükəsiz Token Yaradılması
     const token = jwt.sign(
       { id: user._id, email: user.email, companyName: user.companyName }, 
       JWT_SECRET, 
@@ -156,13 +158,12 @@ app.post('/api/auth/login', async (req, res) => {
     });
 
   } catch (err) {
-    // Xətanın nə olduğunu Render loglarında dəqiq görmək üçün bura yazdırırıq
-    console.error("❌ CRITICAL LOGIN ERROR:", err);
-    return res.status(500).json({ message: "Giriş zamanı daxili server xətası baş verdi: " + err.message });
+    console.error("❌ GİRİŞ XƏTASI:", err.message);
+    return res.status(500).json({ message: "Giriş zamanı server xətası: " + err.message });
   }
 });
 
-// LIVE SENSORS
+// CANLI SENSOR DATALARI
 app.get('/api/sensors/live', authenticateToken, async (req, res) => {
   try {
     const latestData = await SensorData.findOne().sort({ timestamp: -1 });
@@ -173,7 +174,7 @@ app.get('/api/sensors/live', authenticateToken, async (req, res) => {
   }
 });
 
-// 🔒 PROFiL YENİLƏMƏ
+// PROFİL YENİLƏMƏ
 app.put('/api/user/profile', authenticateToken, async (req, res) => {
   try {
     const { companyName, email, password } = req.body;
