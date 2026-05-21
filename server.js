@@ -2,11 +2,11 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose'); 
-const bcrypt = require('bcryptjs'); // Yeni yüklədiyimiz şifrələmə paketi
+const bcrypt = require('bcryptjs');
 
 const app = express();
 
-// Netlify-dan gələn sorğuları bloklamamaq üçün CORS ayarı
+// CORS Ayarları
 app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 
@@ -20,8 +20,8 @@ mongoose.connect(MONGO_URI)
 // --- 1. REAL İSTİFADƏÇİ MODELİ ---
 const UserSchema = new mongoose.Schema({
   companyName: { type: String, required: true },
-  userId: { type: String, required: true, unique: true }, // Unikal Müəssisə ID
-  email: { type: String, required: true, unique: true },   // Unikal E-poçt
+  userId: { type: String, required: true, unique: true }, 
+  email: { type: String, required: true, unique: true },   
   password: { type: String, required: true }
 });
 const User = mongoose.model('User', UserSchema);
@@ -50,6 +50,7 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Avtomatik Sensor Data Generatoru
 setInterval(async () => {
   try {
     const newData = new SensorData({
@@ -77,7 +78,7 @@ app.get('/', (req, res) => {
   res.send('🚀 BlueGreen ESG Backend Server rəsmi olaraq aktivdir!');
 });
 
-// QEYDİYYAT ROUTE-U (Şifrəni gizlədir və bazaya yazır)
+// QEYDİYYAT (REGISTER) ROUTE-U
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { companyName, email, password, userId } = req.body;
@@ -86,13 +87,11 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ message: "Bütün xanaları doldurun!" });
     }
 
-    // Eyni mail və ya ID varammı yoxlayırıq
     const existingUser = await User.findOne({ $or: [{ email }, { userId }] });
     if (existingUser) {
       return res.status(400).json({ message: "Bu e-poçt və ya Müəssisə ID artıq qeydiyyatdan keçib!" });
     }
 
-    // Şifrəni bazaya yazmazdan əvvəl rəsmən şifrləyirik (Hash edirik)
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -107,35 +106,47 @@ app.post('/api/auth/register', async (req, res) => {
     res.status(201).json({ message: "Qeydiyyat uğurla tamamlandı!" });
 
   } catch (err) {
-    res.status(500).json({ message: "Qeydiyyat zamanı server xətası baş verdi." });
+    console.error("❌ REGISTER XƏTASI:", err.message);
+    res.status(500).json({ message: "Qeydiyyat zamanı server xətası: " + err.message });
   }
 });
 
-// GİRİŞ ROUTE-U (Artıq təsadüfi mailləri bloklayır, bazadan yoxlayır)
+// GİRİŞ (LOGIN) ROUTE-U - 500 XƏTASINI KÖKÜNDƏN HƏLL EDƏN HİSSƏ
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password, userId } = req.body;
 
     if (!email || !password || !userId) {
-      return res.status(400).json({ message: "Bütün xanaları doldurun!" });
+      return res.status(400).json({ message: "Müəssisə ID, E-poçt və Şifrə mütləqdir!" });
     }
 
-    // İstifadəçini bazadan axtarırıq
+    // İlk öncə istifadəçini sadəcə email və userId ilə axtarırıq
     const user = await User.findOne({ email, userId });
     if (!user) {
       return res.status(400).json({ message: "Müəssisə ID və ya E-poçt yanlışdır!" });
     }
 
-    // Şifrənin düzgünlüyünü yoxlayırıq
-    const isMatch = await bcrypt.compare(password, user.password);
+    // Əgər bazada köhnə təhlükəsizlik tənzimləməsindən qalan heşlənməmiş şifrə varsa, sistemin çökməməsi üçün yoxlanış
+    let isMatch = false;
+    try {
+      isMatch = await bcrypt.compare(password, user.password);
+    } catch (bcryptErr) {
+      // Əgər bazadakı şifrə köhnədirsə (heşlənməyibsə), birbaşa mətn müqayisəsi edir ki, 500 xətası verməsin
+      isMatch = (password === user.password);
+    }
+
     if (!isMatch) {
       return res.status(400).json({ message: "Şifrə yanlışdır!" });
     }
 
-    // Hər şey düzdürsə, token yaradırıq
-    const token = jwt.sign({ id: user._id, email: user.email, companyName: user.companyName }, JWT_SECRET, { expiresIn: '24h' });
+    // Token Yaradılması
+    const token = jwt.sign(
+      { id: user._id, email: user.email, companyName: user.companyName }, 
+      JWT_SECRET, 
+      { expiresIn: '24h' }
+    );
     
-    res.json({
+    return res.json({
       token,
       user: {
         email: user.email,
@@ -145,7 +156,9 @@ app.post('/api/auth/login', async (req, res) => {
     });
 
   } catch (err) {
-    res.status(500).json({ message: "Giriş zamanı server xətası baş verdi." });
+    // Xətanın nə olduğunu Render loglarında dəqiq görmək üçün bura yazdırırıq
+    console.error("❌ CRITICAL LOGIN ERROR:", err);
+    return res.status(500).json({ message: "Giriş zamanı daxili server xətası baş verdi: " + err.message });
   }
 });
 
@@ -157,6 +170,32 @@ app.get('/api/sensors/live', authenticateToken, async (req, res) => {
     res.json(latestData);
   } catch (err) {
     res.status(500).json({ message: "Server xətası baş verdi." });
+  }
+});
+
+// 🔒 PROFiL YENİLƏMƏ
+app.put('/api/user/profile', authenticateToken, async (req, res) => {
+  try {
+    const { companyName, email, password } = req.body;
+    const userId = req.user.id; 
+
+    const updateData = {};
+    if (companyName) updateData.companyName = companyName;
+    if (email) updateData.email = email;
+    
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      updateData.password = await bcrypt.hash(password, salt);
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true });
+    if (!updatedUser) {
+      return res.status(404).json({ message: "İstifadəçi tapılmadı." });
+    }
+
+    res.json({ message: "Profil uğurla yeniləndi!" });
+  } catch (err) {
+    res.status(500).json({ message: "Profil yenilənərkən daxili server xətası baş verdi." });
   }
 });
 
