@@ -2,10 +2,11 @@ const express = require('express');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose'); 
+const bcrypt = require('bcryptjs'); // Yeni yüklədiyimiz şifrələmə paketi
 
 const app = express();
 
-// CORS ayarını hər kəsə açırıq ki Netlify rəvan qoşulsun
+// Netlify-dan gələn sorğuları bloklamamaq üçün CORS ayarı
 app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 
@@ -16,7 +17,16 @@ mongoose.connect(MONGO_URI)
   .then(() => console.log('💾 MongoDB-yə uğurla qoşuldu!'))
   .catch(err => console.error('❌ MongoDB qoşulma xətası:', err));
 
-// --- SENSOR SCHEMA & INTERVAL (Olduğu kimi qalır) ---
+// --- 1. REAL İSTİFADƏÇİ MODELİ ---
+const UserSchema = new mongoose.Schema({
+  companyName: { type: String, required: true },
+  userId: { type: String, required: true, unique: true }, // Unikal Müəssisə ID
+  email: { type: String, required: true, unique: true },   // Unikal E-poçt
+  password: { type: String, required: true }
+});
+const User = mongoose.model('User', UserSchema);
+
+// --- 2. SENSOR MODELİ VƏ İNTERVAL ---
 const SensorDataSchema = new mongoose.Schema({
   co2Emission: Number,
   energyConsumption: Number,
@@ -26,13 +36,11 @@ const SensorDataSchema = new mongoose.Schema({
   trainingHours: Number,
   timestamp: { type: Date, default: Date.now }
 });
-
 const SensorData = mongoose.model('SensorData', SensorDataSchema);
 
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-
   if (!token) return res.status(401).json({ message: 'Token tapılmadı' });
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
@@ -63,14 +71,85 @@ setInterval(async () => {
   }
 }, 5000);
 
-// --- API MARŞRUTLARI (ROUTES) ---
+// --- 3. API MARŞRUTLARI (ROUTES) ---
 
-// 1. Ünvan yoxlaması üçün ana səhifə (Cannot GET xətası verməsin deyə)
 app.get('/', (req, res) => {
   res.send('🚀 BlueGreen ESG Backend Server rəsmi olaraq aktivdir!');
 });
 
-// 2. LIVE SENSORS
+// QEYDİYYAT ROUTE-U (Şifrəni gizlədir və bazaya yazır)
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { companyName, email, password, userId } = req.body;
+    
+    if (!email || !password || !userId || !companyName) {
+      return res.status(400).json({ message: "Bütün xanaları doldurun!" });
+    }
+
+    // Eyni mail və ya ID varammı yoxlayırıq
+    const existingUser = await User.findOne({ $or: [{ email }, { userId }] });
+    if (existingUser) {
+      return res.status(400).json({ message: "Bu e-poçt və ya Müəssisə ID artıq qeydiyyatdan keçib!" });
+    }
+
+    // Şifrəni bazaya yazmazdan əvvəl rəsmən şifrləyirik (Hash edirik)
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    const newUser = new User({
+      companyName,
+      email,
+      userId,
+      password: hashedPassword
+    });
+
+    await newUser.save();
+    res.status(201).json({ message: "Qeydiyyat uğurla tamamlandı!" });
+
+  } catch (err) {
+    res.status(500).json({ message: "Qeydiyyat zamanı server xətası baş verdi." });
+  }
+});
+
+// GİRİŞ ROUTE-U (Artıq təsadüfi mailləri bloklayır, bazadan yoxlayır)
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password, userId } = req.body;
+
+    if (!email || !password || !userId) {
+      return res.status(400).json({ message: "Bütün xanaları doldurun!" });
+    }
+
+    // İstifadəçini bazadan axtarırıq
+    const user = await User.findOne({ email, userId });
+    if (!user) {
+      return res.status(400).json({ message: "Müəssisə ID və ya E-poçt yanlışdır!" });
+    }
+
+    // Şifrənin düzgünlüyünü yoxlayırıq
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: "Şifrə yanlışdır!" });
+    }
+
+    // Hər şey düzdürsə, token yaradırıq
+    const token = jwt.sign({ id: user._id, email: user.email, companyName: user.companyName }, JWT_SECRET, { expiresIn: '24h' });
+    
+    res.json({
+      token,
+      user: {
+        email: user.email,
+        companyName: user.companyName,
+        userId: user.userId
+      }
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: "Giriş zamanı server xətası baş verdi." });
+  }
+});
+
+// LIVE SENSORS
 app.get('/api/sensors/live', authenticateToken, async (req, res) => {
   try {
     const latestData = await SensorData.findOne().sort({ timestamp: -1 });
@@ -81,46 +160,5 @@ app.get('/api/sensors/live', authenticateToken, async (req, res) => {
   }
 });
 
-// 3. PROFILE UPDATE
-app.put('/api/profile/update', authenticateToken, (req, res) => {
-  const { companyName, email } = req.body;
-  console.log(`Profil yeniləndi: ${companyName}, ${email}`);
-  res.json({ message: "Profil uğurla yeniləndi" });
-});
-
-// 4. LOGIN (Düzəldildi!)
-app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body;
-  if (email && password) {
-    const token = jwt.sign({ email, companyName: "BlueGreen Müəssisə" }, JWT_SECRET, { expiresIn: '24h' });
-    return res.json({
-      token,
-      user: { email: email, companyName: "BlueGreen Müəssisə" }
-    });
-  }
-  return res.status(400).json({ message: "E-poçt və ya şifrə yanlışdır" });
-});
-
-// 5. REGISTER / SIGNUP (Bax bu yox idi, Əlavə edildi!)
-app.post('/api/auth/register', (req, res) => {
-  const { companyName, email, password } = req.body;
-  
-  if (!email || !password) {
-    return res.status(400).json({ message: "E-poçt və şifrə mütləqdir!" });
-  }
-
-  // Real layihədə bura bazaya qeyd etmə funksiyası yazılır. Şərti olaraq uğurlu fərz edirik:
-  const token = jwt.sign({ email, companyName: companyName || "Yeni Müəssisə" }, JWT_SECRET, { expiresIn: '24h' });
-  
-  return res.status(201).json({
-    message: "Qeydiyyat uğurla tamamlandı",
-    token,
-    user: { email, companyName: companyName || "Yeni Müəssisə" }
-  });
-});
-
-// PORT AYARI (Render üçün düzəldildi)
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server ${PORT} portunda aktivdir.`);
-});
+app.listen(PORT, () => console.log(`🚀 Server ${PORT} portunda aktivdir.`));
