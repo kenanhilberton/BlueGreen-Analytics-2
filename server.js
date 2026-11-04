@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { put, get } = require('@vercel/blob');
 
 const app = express();
 
@@ -12,19 +13,32 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '1mb' }));
 
-// JWT açarı. Render/Vercel-də JWT_SECRET env dəyişəni təyin edilə bilər.
+// JWT açarı. Vercel/Render-də JWT_SECRET env dəyişəni təyin edilə bilər.
 const JWT_SECRET = process.env.JWT_SECRET || 'bluegreen_analitika_gizli_acar_2026';
 
 /* ------------------------------------------------------------------ */
-/*  FAYL ƏSASLI VERİLƏNLƏR BAZASI                                      */
-/*  Xarici MongoDB-yə ehtiyac yoxdur. Bütün məlumat db.json faylında    */
-/*  saxlanılır. Render-də repo qovluğunda, Vercel-də isə /tmp-də.       */
+/*  VERİLƏNLƏR BAZASI                                                  */
+/*  Vercel-də: Vercel Blob (daimi, bütün instanslar üçün ortaq)          */
+/*  Render/lokalda: data/db.json faylı                                 */
 /* ------------------------------------------------------------------ */
+
+const USE_BLOB = Boolean(process.env.BLOB_STORE_ID);
+const BLOB_PATHNAME = 'bluegreen/db.json';
 
 const DATA_DIR = process.env.DATA_DIR
   || (process.env.VERCEL ? path.join('/tmp', 'bluegreen-data') : path.join(__dirname, 'data'));
 const DB_FILE = path.join(DATA_DIR, 'db.json');
-const EMPTY_DB = { users: [], sensorData: [] };
+
+function emptyDb() {
+  return { users: [], sensorData: [] };
+}
+
+function normalizeDb(parsed) {
+  return {
+    users: Array.isArray(parsed.users) ? parsed.users : [],
+    sensorData: Array.isArray(parsed.sensorData) ? parsed.sensorData : []
+  };
+}
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -32,41 +46,73 @@ function ensureDataDir() {
   }
 }
 
-function readDb() {
+function readFileDb() {
   try {
     ensureDataDir();
     if (!fs.existsSync(DB_FILE)) {
-      writeDb(EMPTY_DB);
-      return { ...EMPTY_DB };
+      writeFileDb(emptyDb());
+      return emptyDb();
     }
 
     const raw = fs.readFileSync(DB_FILE, 'utf8');
-    if (!raw.trim()) return { ...EMPTY_DB };
+    if (!raw.trim()) return emptyDb();
 
-    const parsed = JSON.parse(raw);
-    return {
-      users: Array.isArray(parsed.users) ? parsed.users : [],
-      sensorData: Array.isArray(parsed.sensorData) ? parsed.sensorData : []
-    };
+    return normalizeDb(JSON.parse(raw));
   } catch (err) {
-    console.error('DB oxunma xətası:', err.message);
-    return { ...EMPTY_DB };
+    console.error('DB fayl oxunma xətası:', err.message);
+    return emptyDb();
   }
 }
 
-function writeDb(db) {
+function writeFileDb(db) {
   ensureDataDir();
   const tmpFile = `${DB_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmpFile, JSON.stringify(db, null, 2), 'utf8');
   fs.renameSync(tmpFile, DB_FILE);
 }
 
-// Kiçik bazada sinxron yazma kifayətdir və paralel sorğularda məlumat itmir.
+async function readDb() {
+  if (USE_BLOB) {
+    const blob = await get(BLOB_PATHNAME, { access: 'private', useCache: false });
+    if (!blob) return emptyDb();
+
+    const raw = await new Response(blob.stream).text();
+    if (!raw.trim()) return emptyDb();
+
+    return normalizeDb(JSON.parse(raw));
+  }
+
+  return readFileDb();
+}
+
+async function writeDb(db) {
+  if (USE_BLOB) {
+    await put(BLOB_PATHNAME, JSON.stringify(db), {
+      access: 'private',
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      contentType: 'application/json'
+    });
+    return;
+  }
+
+  writeFileDb(db);
+}
+
+// Eyni instansdakı paralel yazmaları növbəyə salır.
+let writeQueue = Promise.resolve();
+
 function updateDb(mutator) {
-  const db = readDb();
-  const result = mutator(db);
-  writeDb(db);
-  return result;
+  const job = async () => {
+    const db = await readDb();
+    const result = await mutator(db);
+    await writeDb(db);
+    return result;
+  };
+
+  const next = writeQueue.then(job, job);
+  writeQueue = next.then(() => undefined, () => undefined);
+  return next;
 }
 
 /* ------------------------------------------------------------------ */
@@ -133,42 +179,26 @@ function randomReading() {
   };
 }
 
-// Hər dəfə canlı data istənəndə 4 saniyədən köhnə məlumat varsa yenisi yaradılır.
-function getOrCreateLiveReading() {
-  return updateDb((db) => {
-    const last = db.sensorData[db.sensorData.length - 1];
-    const lastTime = last ? new Date(last.timestamp).getTime() : 0;
-    const isStale = !last || !Number.isFinite(lastTime) || Date.now() - lastTime > 4000;
-
-    if (isStale) {
-      db.sensorData.push(randomReading());
-      if (db.sensorData.length > 100) {
-        db.sensorData = db.sensorData.slice(-100);
-      }
-      return db.sensorData[db.sensorData.length - 1];
-    }
-
-    return last;
-  });
-}
-
 /* ------------------------------------------------------------------ */
 /*  API MARŞRUTLARI                                                   */
 /* ------------------------------------------------------------------ */
 
 app.get('/', (req, res) => {
-  res.send('✅ BlueGreen ESG Backend Server aktivdir və fayl əsaslı bazaya qoşulub!');
+  res.send('✅ BlueGreen ESG Backend Server aktivdir!');
 });
 
-app.get('/api/health', (req, res) => {
-  const db = readDb();
-  res.json({
-    status: 'ok',
-    storage: 'file',
-    dbFile: DB_FILE,
-    users: db.users.length,
-    sensorReadings: db.sensorData.length
-  });
+app.get('/api/health', async (req, res) => {
+  try {
+    const db = await readDb();
+    res.json({
+      status: 'ok',
+      storage: USE_BLOB ? 'vercel-blob' : 'file',
+      users: db.users.length,
+      savedSensorReadings: db.sensorData.length
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', storage: USE_BLOB ? 'vercel-blob' : 'file', message: err.message });
+  }
 });
 
 // QEYDİYYAT
@@ -187,9 +217,9 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ message: 'Şifrə ən azı 6 simvoldan ibarət olmalıdır!' });
     }
 
-    const db = readDb();
+    const db = await readDb();
     const duplicate = db.users.find(
-      (u) => u.email === email || u.userId.toLowerCase() === userId.toLowerCase()
+      (u) => u.email === email || String(u.userId).toLowerCase() === userId.toLowerCase()
     );
 
     if (duplicate) {
@@ -207,13 +237,18 @@ app.post('/api/auth/register', async (req, res) => {
       createdAt: new Date().toISOString()
     };
 
-    updateDb((store) => {
-      // Paralel qeydiyyat sorğusu üçün son yoxlama
+    const created = await updateDb((store) => {
       const exists = store.users.find(
-        (u) => u.email === email || u.userId.toLowerCase() === userId.toLowerCase()
+        (u) => u.email === email || String(u.userId).toLowerCase() === userId.toLowerCase()
       );
-      if (!exists) store.users.push(newUser);
+      if (exists) return false;
+      store.users.push(newUser);
+      return true;
     });
+
+    if (!created) {
+      return res.status(400).json({ message: 'Bu e-poçt və ya Müəssisə ID artıq qeydiyyatdan keçib!' });
+    }
 
     return res.status(201).json({
       message: 'Qeydiyyat uğurla tamamlandı!',
@@ -236,9 +271,9 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ message: 'Müəssisə ID, e-poçt və şifrə mütləqdir!' });
     }
 
-    const db = readDb();
+    const db = await readDb();
     const user = db.users.find(
-      (u) => u.email === email && u.userId.toLowerCase() === userId.toLowerCase()
+      (u) => u.email === email && String(u.userId).toLowerCase() === userId.toLowerCase()
     );
 
     if (!user) {
@@ -268,10 +303,10 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // CANLI SENSOR DATALARI
+// Hər sorğuda yeni göstərici qaytarılır. Bu, Blob-a yazma sayını azaldır.
 app.get('/api/sensors/live', authenticateToken, (req, res) => {
   try {
-    const reading = getOrCreateLiveReading();
-    return res.json(reading);
+    return res.json(randomReading());
   } catch (err) {
     console.error('SENSOR XƏTASI:', err.message);
     return res.status(500).json({ message: 'Sensor məlumatları götürülərkən xəta baş verdi.' });
@@ -279,7 +314,7 @@ app.get('/api/sensors/live', authenticateToken, (req, res) => {
 });
 
 // SENSOR DATASI YAZMAQ (lazım olarsa xarici cihazlar üçün)
-app.post('/api/sensors/data', (req, res) => {
+app.post('/api/sensors/data', async (req, res) => {
   try {
     const {
       co2Emission,
@@ -301,7 +336,7 @@ app.post('/api/sensors/data', (req, res) => {
       timestamp: new Date().toISOString()
     };
 
-    updateDb((db) => {
+    await updateDb((db) => {
       db.sensorData.push(reading);
       if (db.sensorData.length > 100) db.sensorData = db.sensorData.slice(-100);
     });
@@ -320,7 +355,7 @@ app.put('/api/user/profile', authenticateToken, async (req, res) => {
     const email = req.body.email !== undefined ? normalizeEmail(req.body.email) : null;
     const password = req.body.password ? String(req.body.password) : null;
 
-    const db = readDb();
+    const db = await readDb();
     const user = db.users.find((u) => u._id === req.user.id);
 
     if (!user) {
@@ -342,7 +377,7 @@ app.put('/api/user/profile', authenticateToken, async (req, res) => {
       hashedPassword = await bcrypt.hash(password, 10);
     }
 
-    updateDb((store) => {
+    await updateDb((store) => {
       const target = store.users.find((u) => u._id === req.user.id);
       if (!target) return;
       if (companyName) target.companyName = companyName;
@@ -372,7 +407,9 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 5000;
 if (require.main === module) {
-  app.listen(PORT, () => console.log(`✅ Server ${PORT} portunda aktivdir.`));
+  app.listen(PORT, () => {
+    console.log(`✅ Server ${PORT} portunda aktivdir. Baza: ${USE_BLOB ? 'Vercel Blob' : DB_FILE}`);
+  });
 }
 
 module.exports = app;
