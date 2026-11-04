@@ -166,16 +166,41 @@ function authenticateToken(req, res, next) {
   });
 }
 
-function randomReading() {
+// Göstəriciləri təsadüfi sıçrayışlarla deyil, yumşaq dalğa + kiçik səs-küylə
+// dəyişdiririk. Dəyərlər zamana bağlı olduğu üçün bütün server instansları
+// eyni trendi göstərir və 20-30 saniyə ərzində kəskin dəyişmir.
+function pseudoNoise(now, bucketMs, key) {
+  const bucket = Math.floor(now / bucketMs);
+  const keyHash = [...key].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  let h = bucket * 374761393 + keyHash * 668265263;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  h ^= h >>> 16;
+  return ((h >>> 0) / 4294967295) * 2 - 1;
+}
+
+function wave(now, periodMs, amplitude, phase = 0) {
+  return Math.sin((now / periodMs) * Math.PI * 2 + phase) * amplitude;
+}
+
+function getLiveReading() {
+  const now = Date.now();
+
+  const co2 = 46 + wave(now, 12 * 60 * 1000, 4.5, 0.4) + pseudoNoise(now, 30000, 'co2') * 0.6;
+  const energy = 57 + wave(now, 9 * 60 * 1000, 6, 1.7) + pseudoNoise(now, 30000, 'energy') * 0.8;
+  const water = 3200 + wave(now, 15 * 60 * 1000, 240, 2.2) + pseudoNoise(now, 30000, 'water') * 35;
+  const waste = 76 + wave(now, 25 * 60 * 1000, 2.5, 0.9) + pseudoNoise(now, 30000, 'waste') * 0.4;
+  const hse = 324 + wave(now, 6 * 60 * 60 * 1000, 3, 0.2) + pseudoNoise(now, 60000, 'hse') * 0.5;
+  const training = 18 + wave(now, 40 * 60 * 1000, 1.2, 2.6) + pseudoNoise(now, 60000, 'training') * 0.25;
+
   return {
-    _id: crypto.randomUUID(),
-    co2Emission: Number((Math.random() * 60 + 30).toFixed(2)),
-    energyConsumption: Number((Math.random() * 60 + 25).toFixed(2)),
-    waterUsage: Math.floor(Math.random() * 2000 + 2000),
-    wasteRecycled: Math.floor(Math.random() * 30 + 65),
-    hseIncidents: Math.floor(Math.random() * 65 + 300),
-    trainingHours: Math.floor(Math.random() * 14 + 10),
-    timestamp: new Date().toISOString()
+    _id: 'live-' + Math.floor(now / 30000),
+    co2Emission: Number(co2.toFixed(2)),
+    energyConsumption: Number(energy.toFixed(2)),
+    waterUsage: Math.round(water),
+    wasteRecycled: Number(waste.toFixed(1)),
+    hseIncidents: Math.round(hse),
+    trainingHours: Number(training.toFixed(1)),
+    timestamp: new Date(now).toISOString()
   };
 }
 
@@ -306,7 +331,7 @@ app.post('/api/auth/login', async (req, res) => {
 // Hər sorğuda yeni göstərici qaytarılır. Bu, Blob-a yazma sayını azaldır.
 app.get('/api/sensors/live', authenticateToken, (req, res) => {
   try {
-    return res.json(randomReading());
+    return res.json(getLiveReading());
   } catch (err) {
     console.error('SENSOR XƏTASI:', err.message);
     return res.status(500).json({ message: 'Sensor məlumatları götürülərkən xəta baş verdi.' });
