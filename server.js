@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { put, get } = require('@vercel/blob');
+const { getAiStatus, chatWithAi, allowAiRequest } = require('./ai');
 
 const app = express();
 
@@ -324,6 +325,63 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) {
     console.error('GİRİŞ XƏTASI:', err.message);
     return res.status(500).json({ message: 'Giriş zamanı server xətası: ' + err.message });
+  }
+});
+
+// AI STATUS — frontend real LLM-in qoşulub-qoşulmadığını bilir
+app.get('/api/ai/status', authenticateToken, (req, res) => {
+  return res.json(getAiStatus());
+});
+
+// AI CHAT — real LLM cavabı. Açar yoxsa frontend lokal köməkçiyə keçir.
+app.post('/api/ai/chat', authenticateToken, async (req, res) => {
+  try {
+    const status = getAiStatus();
+
+    if (!status.configured) {
+      return res.status(503).json({
+        message: 'AI API açarı hələ konfiqurasiya edilməyib.',
+        configured: false
+      });
+    }
+
+    if (!allowAiRequest(req.user.id)) {
+      return res.status(429).json({
+        message: 'Çox sayda sorğu göndərdiniz. Bir neçə saniyə sonra yenidən cəhd edin.',
+        configured: true
+      });
+    }
+
+    const message = String(req.body.message || '').trim();
+    if (!message) {
+      return res.status(400).json({ message: 'Sual boşdur.', configured: true });
+    }
+    if (message.length > 2000) {
+      return res.status(400).json({ message: 'Sual maksimum 2000 simvol ola bilər.', configured: true });
+    }
+
+    const lang = ['az', 'en', 'ru'].includes(req.body.lang) ? req.body.lang : 'az';
+    const context =
+      req.body.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
+        ? req.body.context
+        : {};
+
+    const result = await chatWithAi({ message, lang, context });
+
+    return res.json({
+      answer: result.answer,
+      provider: result.provider,
+      model: result.model
+    });
+  } catch (err) {
+    const notConfigured = err.code === 'AI_API_NOT_CONFIGURED';
+    console.error('AI XƏTASI:', err.message);
+    return res.status(notConfigured ? 503 : 502).json({
+      message: notConfigured
+        ? 'AI API açarı hələ konfiqurasiya edilməyib.'
+        : 'AI xidməti cavab vermədi. Zəhmət olmasa yenidən cəhd edin.',
+      configured: !notConfigured
+    });
   }
 });
 
