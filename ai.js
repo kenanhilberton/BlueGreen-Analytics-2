@@ -15,6 +15,7 @@ const DEFAULT_MODELS = {
   gemini: 'gemini-2.0-flash',
   groq: 'llama-3.3-70b-versatile',
   openai: 'gpt-4o-mini',
+  pollinations: 'openai',
   custom: 'gpt-4o-mini'
 };
 
@@ -22,7 +23,8 @@ const DEFAULT_BASE_URLS = {
   openrouter: 'https://openrouter.ai/api/v1',
   groq: 'https://api.groq.com/openai/v1',
   openai: 'https://api.openai.com/v1',
-  gemini: 'https://generativelanguage.googleapis.com/v1beta'
+  gemini: 'https://generativelanguage.googleapis.com/v1beta',
+  pollinations: 'https://text.pollinations.ai'
 };
 
 function detectProvider() {
@@ -33,7 +35,9 @@ function detectProvider() {
   if (process.env.GROQ_API_KEY) return 'groq';
   if (process.env.OPENAI_API_KEY) return 'openai';
   if (process.env.AI_API_KEY && process.env.AI_BASE_URL) return 'custom';
-  return '';
+  // Açar yoxdursa, açarsız pulsuz LLM ilə işləyir. Açar əlavə edildikdə
+  // avtomatik olaraq daha keyfiyyətli provayderə keçir.
+  return 'pollinations';
 }
 
 function getApiKey(provider) {
@@ -57,8 +61,9 @@ function getAiConfig() {
 
 function getAiStatus() {
   const { provider, apiKey, model } = getAiConfig();
+  const configured = Boolean(provider && model && (apiKey || provider === 'pollinations'));
   return {
-    configured: Boolean(provider && apiKey && model),
+    configured,
     provider: provider || null,
     model: model || null
   };
@@ -121,7 +126,7 @@ async function fetchJson(url, options, timeoutMs = 25000) {
 async function chatWithAi({ message, lang = 'az', context = {} }) {
   const { provider, apiKey, model } = getAiConfig();
 
-  if (!provider || !apiKey || !model) {
+  if (!provider || !model || (!apiKey && provider !== 'pollinations')) {
     const err = new Error('AI_API_NOT_CONFIGURED');
     err.code = 'AI_API_NOT_CONFIGURED';
     throw err;
@@ -153,6 +158,38 @@ async function chatWithAi({ message, lang = 'az', context = {} }) {
 
     if (!answer) throw new Error('AI provider boş cavab qaytardı.');
     return { answer, provider, model };
+  }
+
+  // Açarsız pulsuz LLM (Pollinations) — API açarı olmayanda işləyir.
+  if (provider === 'pollinations') {
+    const base = String(process.env.AI_BASE_URL || DEFAULT_BASE_URLS.pollinations).replace(/\/+$/, '');
+
+    const data = await fetchJson(`${base}/openai`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: message }
+        ],
+        temperature: 0.65,
+        max_tokens: 900,
+        private: true
+      })
+    });
+
+    const rawAnswer = data && data.choices && data.choices[0] && data.choices[0].message
+      ? data.choices[0].message.content
+      : '';
+    const answer = typeof rawAnswer === 'string'
+      ? rawAnswer
+      : Array.isArray(rawAnswer)
+        ? rawAnswer.map((part) => part.text || '').join('')
+        : '';
+
+    if (!answer.trim()) throw new Error('AI provider boş cavab qaytardı.');
+    return { answer: answer.trim(), provider, model };
   }
 
   // OpenAI-uyğun provayderlər: openrouter, groq, openai, custom
