@@ -366,7 +366,8 @@ app.post('/api/ai/chat', authenticateToken, async (req, res) => {
         ? req.body.context
         : {};
 
-    const result = await chatWithAi({ message, lang, context });
+    const history = Array.isArray(req.body.history) ? req.body.history : [];
+    const result = await chatWithAi({ message, lang, context, history });
 
     return res.json({
       answer: result.answer,
