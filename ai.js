@@ -12,7 +12,7 @@ const LANG_NAMES = {
 
 const DEFAULT_MODELS = {
   openrouter: 'meta-llama/llama-3.3-70b-instruct:free',
-  gemini: 'gemini-2.0-flash',
+  gemini: 'gemini-3.1-flash-lite',
   groq: 'llama-3.3-70b-versatile',
   openai: 'gpt-4o-mini',
   pollinations: 'openai',

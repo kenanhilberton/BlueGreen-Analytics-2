@@ -21,19 +21,20 @@ if ([string]::IsNullOrWhiteSpace($key)) {
   exit 1
 }
 
-$envs = 'production,preview,development'
+$project = 'esg-backend'
+$envs = @('-e', 'production', '-e', 'preview', '-e', 'development')
 
 Write-Host "`nAI_PROVIDER=gemini əlavə edilir..." -ForegroundColor Green
-"gemini" | npx vercel env add AI_PROVIDER --environment $envs --force -y
+"gemini" | npx vercel env add AI_PROVIDER --project $project @envs --force -y --no-sensitive
 
-Write-Host "AI_MODEL=gemini-2.0-flash əlavə edilir..." -ForegroundColor Green
-"gemini-2.0-flash" | npx vercel env add AI_MODEL --environment $envs --force -y
+Write-Host "AI_MODEL=gemini-3.1-flash-lite əlavə edilir..." -ForegroundColor Green
+"gemini-3.1-flash-lite" | npx vercel env add AI_MODEL --project $project @envs --force -y --no-sensitive
 
 Write-Host "AI_API_KEY əlavə edilir (gizli)..." -ForegroundColor Green
-$key | npx vercel env add AI_API_KEY --environment $envs --force -y --sensitive
+$key | npx vercel env add AI_API_KEY --project $project @envs --force -y --sensitive
 
 Write-Host "`nRedeploy edilir..." -ForegroundColor Green
-npx vercel --prod
+npx vercel redeploy https://esg-backend-seven.vercel.app --environment production
 
 Write-Host "`nHazırdır!" -ForegroundColor Cyan
 Write-Host "Status yoxlamaq üçün:" -ForegroundColor Cyan
